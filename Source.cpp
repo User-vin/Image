@@ -11,6 +11,43 @@ using json = nlohmann::json;
 
 //utilisation de labelme pour générer les json (avec des polygones à quatres points, pas des rectangles)
 
+//Fonction qui permet de savoir si deux boites englobantes sont proches ou si leur intersection n'est pas vide
+bool is_close_or_overlapping(cv::Rect bbox1, cv::Rect bbox2, int distance_threshold = 10, int small_area_threshold = 300, double overlap_threshold = 0.3) {
+	int intersection_x1 = cv::max(bbox1.x, bbox2.x);
+	int intersection_y1 = cv::max(bbox1.y, bbox2.y);
+	int intersection_x2 = cv::min(bbox1.x + bbox1.width, bbox2.x + bbox2.width);
+	int intersection_y2 = cv::min(bbox1.y + bbox1.height, bbox2.y + bbox2.height);
+
+	int intersection_area = cv::max(0, intersection_x2 - intersection_x1) * cv::max(0, intersection_y2 - intersection_y1);
+
+	int area1 = bbox1.area();
+	int area2 = bbox2.area();
+
+	double overlap_ratio = static_cast<double>(intersection_area) / (area1 + area2 - intersection_area);
+
+	bool horizontal_close = (bbox2.x <= bbox1.x + bbox1.width + distance_threshold) && (bbox1.x <= bbox2.x + bbox2.width + distance_threshold);
+	bool vertical_close = (bbox2.y <= bbox1.y + bbox1.height + distance_threshold) && (bbox1.y <= bbox2.y + bbox2.height + distance_threshold) && (area1 < small_area_threshold || area2 < small_area_threshold);
+
+	return (horizontal_close && vertical_close) || (overlap_ratio >= overlap_threshold);
+}
+
+//Fonction qui permet de savoir si une boite en contient une autre (totalement ou presque, selon un seuil)
+bool is_contained(cv::Rect bbox1, cv::Rect bbox2, double threshold = 0.9) {
+	int intersection_x1 = cv::max(bbox1.x, bbox2.x);
+	int intersection_y1 = cv::max(bbox1.y, bbox2.y);
+	int intersection_x2 = cv::min(bbox1.x + bbox1.width, bbox2.x + bbox2.width);
+	int intersection_y2 = cv::min(bbox1.y + bbox1.height, bbox2.y + bbox2.height);
+
+	int intersection_area = cv::max(0, intersection_x2 - intersection_x1) * cv::max(0, intersection_y2 - intersection_y1);
+	int bbox1_area = bbox1.area();
+
+	double overlap_ratio = static_cast<double>(intersection_area) / bbox1_area;
+
+	return overlap_ratio >= threshold;
+}
+
+
+
 
 //Fonction qui permet de trouver des minimums locaux dans un tableau
 std::vector<int> find_local_minima(cv::Mat mat, int range) {
@@ -67,11 +104,10 @@ void set_values_to_zero(cv::Mat& mat, const std::vector<int>& indices) {
 
 
 //Fonction principale permettant de faire la détéction du tableau, des lignes, des mots et des lettres
-std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
+std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, std::string name) {
 
 	//Conversion en hsv -> flou gaussien -> seuillage (sélection des pixels verts)
 	cv::Mat hsv, gaussian, binary, closing, img = cv::imread(path);
-	//cv::resize(img, img, cv::Size(1000, 1000), cv::INTER_LINEAR);
 	cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
 	cv::GaussianBlur(hsv, gaussian, cv::Size(3, 3), 0);
 	cv::inRange(gaussian, cv::Scalar(30, 0, 0), cv::Scalar(120, 255, 170), binary);
@@ -149,40 +185,11 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 	src_points.push_back(approx[2]);
 	src_points.push_back(approx[3]);
 
-	//Calul des deux angles formés par les deux segments "horizontaux" du quadrilatère représentant le trableau, par rapport à l'axe X
-	float angle1 = std::atan2(src_points[1].y - src_points[0].y, src_points[1].x - src_points[0].x);
-	float angle3 = std::atan2(src_points[3].y - src_points[2].y, src_points[3].x - src_points[2].x);
-
-	//Représentation des angles entre 0 et 2*pi
-	angle1 = std::fmod(angle1 + 2 * CV_PI, 2 * CV_PI);
-	angle3 = std::fmod(angle3 + 2 * CV_PI, 2 * CV_PI);
-
-	//Sélection du plus grand angle
-	float chosen_angle = std::max(angle1, angle3);
-
-	//Sélection de la longueur du segment ayant le plus grand angle
-	float chosen_length;
-	if (chosen_angle == angle1) {
-		chosen_length = cv::norm(src_points[1] - src_points[0]);
-	}
-	else {
-		chosen_length = cv::norm(src_points[3] - src_points[2]);
-	}
-
-	//Calcul du ratio largeur/hauteur
-	float side1_length = cv::norm(src_points[0] - src_points[1]);
-	float side2_length = cv::norm(src_points[1] - src_points[2]);
-	float aspect_ratio = side1_length / side2_length;
-
-	//Coefficient à ajouter à final_width pour les dimensions du résultat du warp
-	float scaling_factor = (chosen_angle - 3) * (5.0 * 0.5 / 3.0) + 0.5;
-	float final_width = chosen_length * aspect_ratio * scaling_factor;
-
 	//Vecteur contenant les 4 nouveaux points du tableau pour le warp
 	std::vector<cv::Point2f> dst_points;
 	dst_points.push_back(cv::Point2f(0, 0));
-	dst_points.push_back(cv::Point2f(final_width, 0));
-	dst_points.push_back(cv::Point2f(final_width, img.rows));
+	dst_points.push_back(cv::Point2f(img.cols, 0));
+	dst_points.push_back(cv::Point2f(img.cols, img.rows));
 	dst_points.push_back(cv::Point2f(0, img.rows));
 
 	//Matrice de transformation pour le warp créée à partir des points de départ et d'arrivée
@@ -190,7 +197,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 	cv::Mat warped_board;
 
 	//Warp
-	cv::warpPerspective(img, warped_board, transform_matrix, cv::Size(static_cast<int>(final_width), img.rows));
+	cv::warpPerspective(img, warped_board, transform_matrix, cv::Size(static_cast<int>(img.cols), img.rows));
 
 
 	//Création de l'objet json qui va contenir tous les labels détectés:
@@ -207,27 +214,156 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 	cv::Mat word_labels, word_stats, word_centroids, gray_board, binary_board, closed_board;
 	cv::cvtColor(warped_board, gray_board, cv::COLOR_BGR2GRAY);
 
+
+
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 	//Seuillage global
 	cv::threshold(gray_board, binary_board, 140, 255, cv::THRESH_BINARY);
 
 	//Création du noyau de taille (45,5) pour fermeture binaire horizontale pour coller les lettres faisant partie du même mot
 	cv::Mat closing_kernel_word = cv::Mat::ones(cv::Size(45, 5), CV_8UC1);
-	cv::morphologyEx(binary_board, closed_board, cv::MORPH_CLOSE, closing_kernel_word);//Tester fermeture binaire
+	cv::morphologyEx(binary_board, closed_board, cv::MORPH_CLOSE, closing_kernel_word);
 
 	//Recherche des composantes connexes (mots)
 	cv::connectedComponentsWithStats(closed_board, word_labels, word_stats, word_centroids);
 
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	
+
+
+	int hh = gray_board.rows;
+	int ww = gray_board.cols;
+	double scale = 800.0 / hh;
+
+	resize(gray_board, gray_board, cv::Size(static_cast<int>(scale* ww), 800));
+	resize(warped_board, warped_board, cv::Size(static_cast<int>(scale* ww), 800));
+	resize(binary_board, binary_board, cv::Size(static_cast<int>(scale* ww), 800));
+	resize(closed_board, closed_board, cv::Size(static_cast<int>(scale* ww), 800));
+	
+	//Seuillage local sur le tableau
+	cv::Mat thresh;
+	adaptiveThreshold(gray_board, thresh, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY_INV, 21, 7);
+
+	//Fermeture binaire sur le tableau
+	cv::Mat kernell = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2));
+	cv::Mat morph;
+	morphologyEx(thresh, morph, cv::MORPH_CLOSE, kernell);
+
+	//Recherche des composantes connexes
+	cv::Mat labels, stats, centroids;
+	int num_labels = connectedComponentsWithStats(morph, labels, stats, centroids);
+
+	std::map<int, std::vector<std::vector<cv::Point>>> contours_dict;
+
+	//Recherche des contours après le seuillage, en supprimant tous les contours dont l'aire est inférieure à 100
+	for (int label = 1; label < num_labels; ++label) {
+		cv::Mat mask = labels == label;
+			std::vector<std::vector<cv::Point>> contours;
+			findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+			contours.erase(remove_if(contours.begin(), contours.end(), [](const std::vector<cv::Point>& cnt) { return cv::contourArea(cnt) <= 100; }), contours.end());
+			contours_dict.insert(std::pair<int, std::vector<std::vector<cv::Point>>>(label, contours));
+	}
+
+	//Création du vecteur bbox qui va contenir les coordonées
+	std::vector<cv::Rect> bboxes;
+		for (int label = 1; label < num_labels; ++label) {
+			for (const std::vector<cv::Point>& cnt : contours_dict[label]) {
+				cv::Rect bbox = boundingRect(cnt);
+				bboxes.push_back(bbox);
+			}
+		}
+
+	//On fusionne les rectangle qui sont très proches ou qui ont une intersection non nulle fixée par un seuil
+	std::vector<std::vector<cv::Rect>> clusters;
+	for (const cv::Rect& bbox : bboxes) {
+		bool added_to_existing_cluster = false;
+		for (std::vector<cv::Rect>& cluster : clusters) {
+			for (const cv::Rect& other_bbox : cluster) {
+				if (is_close_or_overlapping(bbox, other_bbox)) {
+					cluster.push_back(bbox);
+					added_to_existing_cluster = true;
+					break;
+				}
+			}
+			if (added_to_existing_cluster) {
+				break;
+			}
+		}
+
+		if (!added_to_existing_cluster) {
+			clusters.push_back(std::vector<cv::Rect>(1, bbox));
+		}
+	}
+
+	std::vector<cv::Rect> cluster_bboxes;
+	int max_area_threshold = 100000;
+	double aspect_ratio_threshold = 6.0;
+	int max_width_threshold = 400;
+	int max_height_threshold = 400;
+	int min_dist_border = 20;
+
+	//Suppression des rectangles qui ne respectent pas certaines conditions sur la taille, ou qui sont sur les bords des images
+	//(Peu de chance que ça soit de l'écriture)
+	for (const std::vector<cv::Rect>& cluster : clusters) {
+		int x1 = INT_MAX, y1 = INT_MAX, x2 = 0, y2 = 0;
+		for (const cv::Rect& bbox : cluster) {
+			x1 = cv::min(x1, bbox.x);
+			y1 = cv::min(y1, bbox.y);
+			x2 = cv::max(x2, bbox.x + bbox.width);
+			y2 = cv::max(y2, bbox.y + bbox.height);
+		}
+
+		int area = (x2 - x1) * (y2 - y1);
+		int width = x2 - x1;
+		int height = y2 - y1;
+
+
+		int height_warped_board = warped_board.rows;
+		int width_warped_board = warped_board.cols;
+
+		double aspect_ratio = static_cast<double>(cv::max(width, height)) / cv::min(width, height);
+
+		if (area <= max_area_threshold && aspect_ratio <= aspect_ratio_threshold && width <= max_width_threshold && height <= max_height_threshold &&
+			x1 >= min_dist_border && x1 <= width_warped_board - min_dist_border && y1 >= min_dist_border && y1 <= height_warped_board - min_dist_border) {
+			cluster_bboxes.push_back(cv::Rect(x1, y1, width, height));
+		}
+	}
+
+	//Suppression des rectangles contenus entièrement ou presque dans d'autes rectangles
+	std::vector<cv::Rect> filtered_bboxes;
+	for (const cv::Rect& bbox1 : cluster_bboxes) {
+		bool contained = false;
+		for (const cv::Rect& bbox2 : cluster_bboxes) {
+			if (bbox1 != bbox2 && is_contained(bbox1, bbox2)) {
+				contained = true;
+				break;
+			}
+		}
+
+		if (!contained) {
+			filtered_bboxes.push_back(bbox1);
+		}
+	}
+	/**
+	//Dessin des rectangles
+	for (const cv::Rect& bbox : filtered_bboxes) {
+		rectangle(warped_board, bbox, cv::Scalar(0, 255, 0), 2);
+	}
+	**/
+
 	//Création du vecteur qui va contenir les coordonnées des boites englobantes des mots
 	std::vector<std::vector<int>> word_bboxes;
-
-	//Parcours des composantes connexes trouvées
-	for (int k = 1; k < word_stats.rows; k++) {
+	//Parcours des composantes connexes trouvées (les boites englobantes)
+	for(const auto &bbox:filtered_bboxes){
 
 		//On récupère les coordonnées des boites englobantes des mots trouvés
-		int x = word_stats.at<int>(cv::Point(0, k));
-		int y = word_stats.at<int>(cv::Point(1, k));
-		int w = word_stats.at<int>(cv::Point(2, k));
-		int h = word_stats.at<int>(cv::Point(3, k));
+		int x = bbox.x;
+		int y = bbox.y;
+		int w = bbox.width;
+		int h = bbox.height;
 
 		//Condition pour ignorer les composantes connexes trop petites
 		if (w*h > 500){
@@ -257,7 +393,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 				}
 			}
 
-			//Application d'un mask pour ne garder que uniquement le mot
+			//Application d'un masque pour ne garder que uniquement le mot
 			cv::Mat binary_cropped_word = binary_board(cv::Rect(x, y, w, h));
 			cv::Mat largestComponentMask = (labs == largestLabel);
 			cv::Mat result;
@@ -268,7 +404,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 			word_bboxes.emplace_back(std::vector<int>{x, y, w, h});
 
 			//Condition pour prendre seulement les boites engloabantes des composantes connexes assez grandes
-			int range = 60;
+			int range = 10;
 			if (result.cols > range) {
 
 				int width = result.cols;
@@ -317,34 +453,44 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 	std::vector<std::vector<int>> lines;
 	lines.emplace_back(std::vector<int>{0});
 
+
+
 	for (int i = 1; i < word_bboxes.size(); i++) {
 		if (((word_bboxes[i - 1][1] + word_bboxes[i - 1][3]) <= word_bboxes[i][1]) || (word_bboxes[i - 1][1] >= (word_bboxes[i][1] + word_bboxes[i][3]))){
 			lines.emplace_back(std::vector<int>{i});
 		}
-		else if ((word_bboxes[i - 1][1] > word_bboxes[i][1]) && ((word_bboxes[i - 1][1] + word_bboxes[i - 1][3]) < (word_bboxes[i][1] + word_bboxes[i][3])) || (word_bboxes[i - 1][1] < word_bboxes[i][1]) && ((word_bboxes[i - 1][1] + word_bboxes[i - 1][3]) > (word_bboxes[i][1] + word_bboxes[i][3]))) {
+		else if ((word_bboxes[i - 1][1] >= word_bboxes[i][1]) && ((word_bboxes[i - 1][1] + word_bboxes[i - 1][3]) <= (word_bboxes[i][1] + word_bboxes[i][3])) || (word_bboxes[i - 1][1] <= word_bboxes[i][1]) && ((word_bboxes[i - 1][1] + word_bboxes[i - 1][3]) >= (word_bboxes[i][1] + word_bboxes[i][3]))) {
 			lines.back().push_back(i);
 		}
-		else if (word_bboxes[i - 1][1] < word_bboxes[i][1]) {
-			int dist = word_bboxes[i][1] + word_bboxes[i][3] - word_bboxes[i - 1][1];
-			double vertical_intersection = std::max((double)dist / word_bboxes[i][3], (double)dist / word_bboxes[i-1][3]);
-			if (vertical_intersection >= 0.7) {
-				lines.back().push_back(i);
-			}
-		}
-		else if (word_bboxes[i - 1][1] > word_bboxes[i][1]) {
+		else if (word_bboxes[i - 1][1] <= word_bboxes[i][1]) {
 			int dist = word_bboxes[i - 1][1] + word_bboxes[i - 1][3] - word_bboxes[i][1];
 			double vertical_intersection = std::max((double)dist / word_bboxes[i][3], (double)dist / word_bboxes[i-1][3]);
 			if (vertical_intersection >= 0.7) {
 				lines.back().push_back(i);
 			}
+			else {
+				lines.emplace_back(std::vector<int>{i});
+			}
 		}
+		else if (word_bboxes[i - 1][1] >= word_bboxes[i][1]) {
+			int dist = word_bboxes[i][1] + word_bboxes[i][3] - word_bboxes[i - 1][1];
+			double vertical_intersection = std::max((double)dist / word_bboxes[i][3], (double)dist / word_bboxes[i-1][3]);
+			if (vertical_intersection >= 0.7) {
+				lines.back().push_back(i);
+			}
+			else {
+				lines.emplace_back(std::vector<int>{i});
+			}
+		}
+
 	}
+
 
 	//tri des mots de chaque ligne en fonction de leur x_min, pour les remettre dans l'ordre
 	for (auto& line : lines) {
 		std::sort(line.begin(), line.end(), [&](int i, int j) {
 			return word_bboxes[i][0] < word_bboxes[j][0];
-			});
+		});
 	}
 
 	//dessin des rectangles des lignes
@@ -373,16 +519,16 @@ std::tuple<json, cv::Mat, cv::Mat, int, int> detection(std::string path) {
 	}
 
 	//Sauvegarde du l'image avec les boites englobantes des objets détéctés
-	cv::imwrite("C:/Users/scott/OneDrive/Bureau/output/output.jpg", warped_board);
+	cv::imwrite("C:/Users/scott/OneDrive/Bureau/output2/" + name + ".jpg", warped_board);
 
 	//Renvoie le json des objets détéctés, la matrice de transformation pour l'appliquer sur les annotations, et les dimensions du tableau transformé (warp)
-	return std::make_tuple(js, transform_matrix, warped_board, warped_board.cols, warped_board.rows);
+	return std::make_tuple(js, transform_matrix, warped_board, warped_board.cols, warped_board.rows, scale);
 }
 
 
 //Simplifie le json généré par labelme donné en paramètre (enlève toutes les informations inutiles)
 //Et application du warp sur les annotations pour que ça corresponde au objets détéctés
-json simplify_json_and_transformation(std::string path, const cv::Mat& transform_matrix, int img_width, int img_height) {
+json simplify_json_and_transformation(std::string path, const cv::Mat& transform_matrix, int img_width, int img_height, cv::Mat warped_board, float scale) {
 	//Lecture du json des annotations
 	std::ifstream f(path);
 	json js_read = json::parse(f);
@@ -400,13 +546,20 @@ json simplify_json_and_transformation(std::string path, const cv::Mat& transform
 			original_points.emplace_back(cv::Point2f(point[0], point[1]));
 		}
 
-		//Application du warp sur les annotations, sauf pour le tableau (on le détècte avant le warp qui sert uniquement à lire son contenu)
+		//Application du warp sur les annotations, sauf pour le tableau (on le détecte avant le warp qui sert uniquement à lire son contenu)
 		if (js_read["shapes"][i]["label"] != "board") {
 			cv::perspectiveTransform(original_points, transformed_points, transform_matrix);
+			//Application du resize sur les annotations
+			for (auto& point : transformed_points) {
+				point.x *= scale;
+				point.y *= scale;
+			}
 		}
 		else {
 			transformed_points = original_points;
 		}
+		
+
 
 		//Insertion des nouvelles coordonnées dans le json
 		js["labels"].insert(js["labels"].end(), js_read["shapes"][i]["label"]);
@@ -420,6 +573,15 @@ json simplify_json_and_transformation(std::string path, const cv::Mat& transform
 			static_cast<int>(transformed_points[3].x + 0.5),
 			static_cast<int>(transformed_points[3].y + 0.5) });
 		js["coords"].insert(js["coords"].end(), json_arr);
+
+		// Draw the polygon on the warped_board image
+		std::vector<cv::Point> points;
+		for (const auto& point : transformed_points) {
+			points.emplace_back(cv::Point(static_cast<int>(point.x + 0.5), static_cast<int>(point.y + 0.5)));
+		}
+		const cv::Point* pts = points.data();
+		int npts = points.size();
+		cv::polylines(warped_board, &pts, &npts, 1, true, cv::Scalar(0, 0, 255), 1);
 	}
 	return js;
 }
@@ -594,20 +756,15 @@ void evaluation(json g, json d, double iou_threshold) {
 	double tp_mean_iou = (tp_board_mean_iou, tp_line_mean_iou, tp_word_mean_iou, tp_letter_mean_iou) / 4;
 
 
-	std::cout << "board" << std::endl;
-	std::cout << "	Precision: " << precision_board << "	Recall: " << recall_board << "	F1_score: " << f1_score_board << "	Average iou of true positives: " << tp_board_mean_iou << std::endl << std::endl;
+	std::cout << "board" << "	Precision: " << precision_board << "	Recall: " << recall_board << "	F1_score: " << f1_score_board << "	Average iou of true positives: " << tp_board_mean_iou << std::endl << std::endl;
 
-	std::cout << "line" << std::endl;
-	std::cout << "	Precision: " << precision_line << "	Recall: " << recall_line << "	F1_score: " << f1_score_line << "	Average iou of true positives: " << tp_line_mean_iou << std::endl << std::endl;
+	std::cout << "line" << "	Precision: " << precision_line << "	Recall: " << recall_line << "	F1_score: " << f1_score_line << "	Average iou of true positives: " << tp_line_mean_iou << std::endl << std::endl;
 
-	std::cout << "word" << std::endl;
-	std::cout << "	Precision: " << precision_word << "	Recall: " << recall_word << "	F1_score: " << f1_score_word << "	Average iou of true positives: " << tp_word_mean_iou << std::endl << std::endl;
+	std::cout << "word" << "	Precision: " << precision_word << "	Recall: " << recall_word << "	F1_score: " << f1_score_word << "	Average iou of true positives: " << tp_word_mean_iou << std::endl << std::endl;
 
-	std::cout << "letter" << std::endl;
-	std::cout << "	Precision: " << precision_letter << "	Recall: " << recall_letter << "	F1_score: " << f1_score_letter << "	Average iou of true positives: " << tp_letter_mean_iou << std::endl << std::endl;
+	std::cout << "letter" << "	Precision: " << precision_letter << "	Recall: " << recall_letter << "	F1_score: " << f1_score_letter << "	Average iou of true positives: " << tp_letter_mean_iou << std::endl << std::endl;
 
-	std::cout << "mean" << std::endl;
-	std::cout << "	Average precision: " << average_precision << "	Average recall: " << average_recall << "	Average f1-score: " << average_f1_score << "	tp mean iou: " << tp_mean_iou << std::endl << std::endl;
+	std::cout << "mean" << "	Average precision: " << average_precision << "	Average recall: " << average_recall << "	Average f1-score: " << average_f1_score << std::endl << std::endl;
 
 	
 	std::cout << "tp_board: " << tp_board << std::endl;
@@ -627,21 +784,49 @@ void evaluation(json g, json d, double iou_threshold) {
 }
 
 
-int main() {
 
-	std::string path = "C:/Users/scott/OneDrive/Bureau/images_poly/19.jpg";
-	std::string path1 = "C:/Users/scott/OneDrive/Bureau/images_poly/19.json";
+int main(){
+	std::string folder_path = "C:/Users/scott/OneDrive/Bureau/images_poly/";//images_poly/
+	std::vector<cv::String> jpg_files, JPG_files;
 
-	auto detection_results = detection(path);
+	//On récupère les jpg et JPG
+	cv::glob(folder_path + "*.jpg", jpg_files, true);
+	cv::glob(folder_path + "*.JPG", JPG_files, true);
 
-	json detected = std::get<0>(detection_results);
-	cv::Mat transform_matrix = std::get<1>(detection_results);
-	int warped_board_width = std::get<3>(detection_results);
-	int warped_board_height = std::get<4>(detection_results);
+	//On combine les deux
+	jpg_files.insert(jpg_files.end(), JPG_files.begin(), JPG_files.end());
 
-	json ground_truth = simplify_json_and_transformation(path1, transform_matrix, warped_board_width, warped_board_height);
+	//Lancement du traitement sur toutes les images et json
+	for (const auto& file : jpg_files) {
 
-	evaluation(ground_truth, detected, 0.8);
+		//Lecture du json
+		std::string json_path = file.substr(0, file.find_last_of('.')) + ".json";
+		cv::String json_file(json_path);
 
+		//Extraction du nom de l'image courante
+		size_t last_separator = file.find_last_of("/\\");
+		size_t last_dot = file.find_last_of('.');
+		std::string image_name = file.substr(last_separator + 1, last_dot - last_separator - 1);
+
+
+		std::cout << "Traitement de l'image : " << image_name << std::endl;
+
+		//Detection
+		auto detection_results = detection(file, image_name);
+		json detected = std::get<0>(detection_results);
+		cv::Mat transform_matrix = std::get<1>(detection_results);
+		cv::Mat warped_board = std::get<2>(detection_results);
+		int warped_board_width = std::get<3>(detection_results);
+		int warped_board_height = std::get<4>(detection_results);
+		float scale = std::get<5>(detection_results);
+
+		//Simplification du json des annotations et application de la transformation sur les annotations
+		json ground_truth = simplify_json_and_transformation(json_path, transform_matrix, warped_board_width, warped_board_height, warped_board, scale);
+
+		//Evalutation
+		evaluation(ground_truth, detected, 0.7);
+
+		std::cout << std::endl << std::endl;
+	}
 	return 0;
 }
