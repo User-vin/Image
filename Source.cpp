@@ -109,6 +109,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	//Conversion en hsv -> flou gaussien -> seuillage (sélection des pixels verts)
 	cv::Mat hsv, gaussian, binary, closing, img = cv::imread(path);
 	cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
+
 	cv::GaussianBlur(hsv, gaussian, cv::Size(3, 3), 0);
 	cv::inRange(gaussian, cv::Scalar(30, 0, 0), cv::Scalar(120, 255, 170), binary);
 
@@ -117,6 +118,8 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	std::vector<std::vector<cv::Point>> contours;
 	std::vector<cv::Vec4i> hierarchy;
 	cv::morphologyEx(binary, closing, cv::MORPH_OPEN, kernel);
+
+	cv::imwrite("C:/Users/scott/OneDrive/Bureau/images_slides/" + name + "2.jpg", closing);
 
 	//Recherche des contours du tableau
 	cv::findContours(closing, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
@@ -211,7 +214,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	js["labels"].insert(js["labels"].end(), "board");
 
 	//Conversion du tableau croppé en gris
-	cv::Mat word_labels, word_stats, word_centroids, gray_board, binary_board, closed_board;
+	cv::Mat  gray_board, binary_board, closed_board;
 	cv::cvtColor(warped_board, gray_board, cv::COLOR_BGR2GRAY);
 
 
@@ -225,9 +228,6 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	//Création du noyau de taille (45,5) pour fermeture binaire horizontale pour coller les lettres faisant partie du même mot
 	cv::Mat closing_kernel_word = cv::Mat::ones(cv::Size(45, 5), CV_8UC1);
 	cv::morphologyEx(binary_board, closed_board, cv::MORPH_CLOSE, closing_kernel_word);
-
-	//Recherche des composantes connexes (mots)
-	cv::connectedComponentsWithStats(closed_board, word_labels, word_stats, word_centroids);
 
 	/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
