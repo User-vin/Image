@@ -47,8 +47,6 @@ bool is_contained(cv::Rect bbox1, cv::Rect bbox2, double threshold = 0.9) {
 }
 
 
-
-
 //Fonction qui permet de trouver des minimums locaux dans un tableau
 std::vector<int> find_local_minima(cv::Mat mat, int range) {
 
@@ -119,7 +117,6 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	std::vector<cv::Vec4i> hierarchy;
 	cv::morphologyEx(binary, closing, cv::MORPH_OPEN, kernel);
 
-	cv::imwrite("C:/Users/scott/OneDrive/Bureau/images_slides/" + name + "2.jpg", closing);
 
 	//Recherche des contours du tableau
 	cv::findContours(closing, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
@@ -200,8 +197,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	cv::Mat warped_board;
 
 	//Warp
-	cv::warpPerspective(img, warped_board, transform_matrix, cv::Size(static_cast<int>(img.cols), img.rows));
-
+	cv::warpPerspective(img, warped_board, transform_matrix, cv::Size(img.cols, img.rows));
 
 	//Création de l'objet json qui va contenir tous les labels détectés:
 	//"labels" : ["board", "board", "line", "line", "line", "word", "letter", etc]
@@ -238,23 +234,23 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	int ww = gray_board.cols;
 	double scale = 800.0 / hh;
 
-	resize(gray_board, gray_board, cv::Size(static_cast<int>(scale* ww), 800));
-	resize(warped_board, warped_board, cv::Size(static_cast<int>(scale* ww), 800));
-	resize(binary_board, binary_board, cv::Size(static_cast<int>(scale* ww), 800));
-	resize(closed_board, closed_board, cv::Size(static_cast<int>(scale* ww), 800));
+	cv::resize(gray_board, gray_board, cv::Size(static_cast<int>(scale* ww), 800));
+	cv::resize(warped_board, warped_board, cv::Size(static_cast<int>(scale* ww), 800));
+	cv::resize(binary_board, binary_board, cv::Size(static_cast<int>(scale* ww), 800));
+	cv::resize(closed_board, closed_board, cv::Size(static_cast<int>(scale* ww), 800));
 	
 	//Seuillage local sur le tableau
 	cv::Mat thresh;
-	adaptiveThreshold(gray_board, thresh, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY_INV, 21, 7);
+	cv::adaptiveThreshold(gray_board, thresh, 255, cv::ADAPTIVE_THRESH_MEAN_C, cv::THRESH_BINARY_INV, 21, 7);
 
 	//Fermeture binaire sur le tableau
 	cv::Mat kernell = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2));
 	cv::Mat morph;
-	morphologyEx(thresh, morph, cv::MORPH_CLOSE, kernell);
+	cv::morphologyEx(thresh, morph, cv::MORPH_CLOSE, kernell);
 
 	//Recherche des composantes connexes
 	cv::Mat labels, stats, centroids;
-	int num_labels = connectedComponentsWithStats(morph, labels, stats, centroids);
+	int num_labels = cv::connectedComponentsWithStats(morph, labels, stats, centroids);
 
 	std::map<int, std::vector<std::vector<cv::Point>>> contours_dict;
 
@@ -262,19 +258,25 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 	for (int label = 1; label < num_labels; ++label) {
 		cv::Mat mask = labels == label;
 			std::vector<std::vector<cv::Point>> contours;
-			findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+			cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 			contours.erase(remove_if(contours.begin(), contours.end(), [](const std::vector<cv::Point>& cnt) { return cv::contourArea(cnt) <= 100; }), contours.end());
 			contours_dict.insert(std::pair<int, std::vector<std::vector<cv::Point>>>(label, contours));
 	}
 
 	//Création du vecteur bbox qui va contenir les coordonées
 	std::vector<cv::Rect> bboxes;
-		for (int label = 1; label < num_labels; ++label) {
-			for (const std::vector<cv::Point>& cnt : contours_dict[label]) {
-				cv::Rect bbox = boundingRect(cnt);
-				bboxes.push_back(bbox);
-			}
+	for (int label = 1; label < num_labels; ++label) {
+		for (const std::vector<cv::Point>& cnt : contours_dict[label]) {
+			cv::Rect bbox = boundingRect(cnt);
+			bboxes.push_back(bbox);
 		}
+	}
+	/**
+	for (auto& box : bboxes) {
+		cv::rectangle(warped_board, cv::Rect(box), cv::Scalar(0, 255, 0));
+	}
+	cv::imwrite("C:/Users/scott/OneDrive/Bureau/images_slides/" + name + "55.jpg", warped_board);
+	**/
 
 	//On fusionne les rectangle qui sont très proches ou qui ont une intersection non nulle fixée par un seuil
 	std::vector<std::vector<cv::Rect>> clusters;
@@ -347,12 +349,6 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 			filtered_bboxes.push_back(bbox1);
 		}
 	}
-	/**
-	//Dessin des rectangles
-	for (const cv::Rect& bbox : filtered_bboxes) {
-		rectangle(warped_board, bbox, cv::Scalar(0, 255, 0), 2);
-	}
-	**/
 
 	//Création du vecteur qui va contenir les coordonnées des boites englobantes des mots
 	std::vector<std::vector<int>> word_bboxes;
@@ -366,7 +362,7 @@ std::tuple<json, cv::Mat, cv::Mat, int, int, float> detection(std::string path, 
 		int h = bbox.height;
 
 		//Condition pour ignorer les composantes connexes trop petites
-		if (w*h > 500){
+		if (w*h > 400){
 			
 			//Dessin du rectangle correspondant au mot courant
 			cv::rectangle(warped_board, cv::Rect(x, y, w, h), cv::Scalar(255, 0, 0), 2);
@@ -574,7 +570,8 @@ json simplify_json_and_transformation(std::string path, const cv::Mat& transform
 			static_cast<int>(transformed_points[3].y + 0.5) });
 		js["coords"].insert(js["coords"].end(), json_arr);
 
-		// Draw the polygon on the warped_board image
+		/**
+		//Dessin des polygones
 		std::vector<cv::Point> points;
 		for (const auto& point : transformed_points) {
 			points.emplace_back(cv::Point(static_cast<int>(point.x + 0.5), static_cast<int>(point.y + 0.5)));
@@ -582,7 +579,10 @@ json simplify_json_and_transformation(std::string path, const cv::Mat& transform
 		const cv::Point* pts = points.data();
 		int npts = points.size();
 		cv::polylines(warped_board, &pts, &npts, 1, true, cv::Scalar(0, 0, 255), 1);
+		**/
 	}
+
+	cv::imwrite("C:/Users/scott/OneDrive/Bureau/images_slides/99.jpg", warped_board);
 	return js;
 }
 
@@ -786,7 +786,7 @@ void evaluation(json g, json d, double iou_threshold) {
 
 
 int main(){
-	std::string folder_path = "C:/Users/scott/OneDrive/Bureau/images_poly/";//images_poly/
+	std::string folder_path = "C:/Users/scott/OneDrive/Bureau/images_poly/";//images_poly/;
 	std::vector<cv::String> jpg_files, JPG_files;
 
 	//On récupère les jpg et JPG
